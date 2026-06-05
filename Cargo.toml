@@ -1,0 +1,13 @@
+[package]
+name = "belousov_zhabotinsky"
+version = "0.1.0"
+edition = "2024"
+
+[profile.dev]
+opt-level = 1
+
+[dependencies]
+vulkano = { version = "0.35.2", default-features = true }
+vulkano-shaders = "0.35.0"
+vulkano-util = "0.35.0"
+winit = "0.30.13"
