@@ -1,0 +1,26 @@
+#version 450
+#include <vulkano.glsl>
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform PushConstantData {
+    SamplerId sampler_id;
+    SampledImageId src_image;
+    StorageImageId dst_image;
+};
+
+vec4 samp(vec2 uv) {
+    return texture(vko_sampler2D(src_image, sampler_id), uv);
+}
+
+void store1(uvec2 dest, vec4 color) {
+    imageStore(vko_image2D_rgba8(dst_image), ivec2(dest), color);
+}
+
+void main() {
+    uvec2 pos = gl_GlobalInvocationID.xy;
+    vec2 uv = pos / 1024.0;
+
+    vec4 color = samp(uv);
+    store1(pos, vec4(1.0, uv.x, uv.y, 1.0));
+}

@@ -1,58 +1,695 @@
 use std::error::Error;
-use std::{sync::Arc, time::Duration};
+use std::mem;
+use std::sync::Arc;
 use std::default::Default;
+use std::slice;
 
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents};
-use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
-use vulkano::sync::GpuFuture;
-use vulkano::{buffer::BufferContents, command_buffer::allocator::StandardCommandBufferAllocator, image::view::ImageView, pipeline::{ DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo, graphics::{GraphicsPipelineCreateInfo, color_blend::{ColorBlendAttachmentState, ColorBlendState}, input_assembly::InputAssemblyState, multisample::MultisampleState, rasterization::RasterizationState, vertex_input::{Vertex, VertexDefinition}, viewport::{Viewport, ViewportState}}, layout::PipelineDescriptorSetLayoutCreateInfo}, render_pass::{self, Framebuffer, FramebufferCreateInfo, RenderPass, Subpass}};
-use vulkano_util::{context::{VulkanoConfig, VulkanoContext}, window::VulkanoWindows};
+use vulkano::Version;
+use vulkano::image::ImageCreateFlags;
+use vulkano::image::ImageLayout;
+use vulkano::image::ImageAspects;
+use vulkano::image::ImageSubresourceRange;
+use vulkano::image::sampler::Filter;
+use vulkano::image::sampler::SamplerCreateInfo;
+use vulkano::image::view::ImageViewCreateInfo;
+use vulkano::instance::InstanceExtensions;
+use vulkano::instance::debug::DebugUtilsMessageSeverity;
+use vulkano::instance::debug::DebugUtilsMessageType;
+use vulkano::instance::debug::DebugUtilsMessenger;
+use vulkano::instance::debug::DebugUtilsMessengerCallback;
+use vulkano::instance::debug::DebugUtilsMessengerCreateInfo;
+use vulkano::{VulkanError, VulkanLibrary};
+use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+use vulkano::device::physical::PhysicalDeviceType;
+use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags};
+use vulkano::image::{Image, ImageCreateInfo, ImageUsage};
+use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
+use vulkano::memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter};
+use vulkano::pipeline::{ComputePipeline, Pipeline};
+use vulkano::pipeline::compute::ComputePipelineCreateInfo;
+use vulkano::swapchain::{Surface, Swapchain, SwapchainCreateInfo};
+use vulkano::{buffer::BufferContents, pipeline::{ DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo, graphics::{GraphicsPipelineCreateInfo, color_blend::{ColorBlendAttachmentState, ColorBlendState}, input_assembly::InputAssemblyState, multisample::MultisampleState, rasterization::RasterizationState, vertex_input::{Vertex, VertexDefinition}, viewport::{Viewport, ViewportState}}}, render_pass::Subpass};
+use vulkano_taskgraph::descriptor_set::BindlessContext;
+use vulkano_taskgraph::descriptor_set::SamplerId;
+use vulkano_taskgraph::resource::ResourcesCreateInfo;
+use vulkano_taskgraph::{ClearValues, Id, Task, TaskContext, resource_map};
+use vulkano_taskgraph::graph::{AttachmentInfo, CompileInfo, ExecutableTaskGraph, ExecuteError, TaskGraph};
+use vulkano_taskgraph::resource::{self, AccessTypes, Flight, HostAccessType, Resources};
+use winit::event_loop::ControlFlow;
+use winit::window::Window;
 use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::EventLoop};
 
 
+mod context;
+mod windowing;
+
+
+const MAX_FRAMES_IN_FLIGHT: u32 = 2;
+const MIN_SWAPCHAIN_IMAGES: u32 = MAX_FRAMES_IN_FLIGHT + 1;
 
 struct App {
-    context: VulkanoContext,
-    windows: VulkanoWindows,
-    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
-    vertex_buffer: Subbuffer<[MyVertex]>,
-    rcx: Option<RenderContext>
+    instance: Arc<Instance>,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    resources: Arc<Resources>,
+    flight_id: Id<Flight>,
+    rcx: Option<RenderContext>,
+    _debug_callback: Option<DebugUtilsMessenger>
 }
 
 
 struct RenderContext {
-    render_pass: Arc<RenderPass>,
-    framebuffers: Vec<Arc<Framebuffer>>,
-    pipeline: Arc<GraphicsPipeline>,
+    window: Arc<Window>,
+    swapchain_id: Id<Swapchain>,
     viewport: Viewport,
+    recreate_swapchain: bool,
+    task_graph: ExecutableTaskGraph<Self>,
+    virtual_swapchain_id: Id<Swapchain>,
+    src_image_id: Id<Image>,
+    dst_image_id: Id<Image>,
+    src_sampler_id: SamplerId,
+    dst_sampler_id: SamplerId,
+    src_storage_image_id: vulkano_taskgraph::descriptor_set::StorageImageId,
+    dst_storage_image_id: vulkano_taskgraph::descriptor_set::StorageImageId,
+    src_sampled_image_id: vulkano_taskgraph::descriptor_set::SampledImageId,
+    dst_sampled_image_id: vulkano_taskgraph::descriptor_set::SampledImageId,
+    virtual_src_image_id: Id<Image>,
+    virtual_dst_image_id: Id<Image>,
+    // render_pass: Arc<RenderPass>,
+    // framebuffers: Vec<Arc<Framebuffer>>,
+    // graphics_pipeline: Arc<GraphicsPipeline>,
+    // compute_pipeline: Arc<ComputePipeline>,
+    // first_image: bool,
+    // textures: [Arc<ImageView>; 2],
 }
 
 
 fn main() -> Result<(), impl Error> {
     let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+
     let mut app = App::new(&event_loop);
 
     event_loop.run_app(&mut app)
 }
 
 impl App {
-    fn new(_event_loop: &EventLoop<()>) -> Self {
-        let context = VulkanoContext::new(VulkanoConfig::default());
+    fn new(event_loop: &EventLoop<()>) -> Self {
+        let library = unsafe { VulkanLibrary::new() }.unwrap();
 
-        let windows = VulkanoWindows::default();
+        let required_extensions = InstanceExtensions {
+            ext_debug_utils: true,
+            ..Surface::required_extensions(event_loop)
+        };
+        let layers = ["VK_LAYER_KHRONOS_validation"];
 
+        let instance = Instance::new(
+            &library,
+            &InstanceCreateInfo {
+                flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
+                enabled_layers: &layers,
+                enabled_extensions: &required_extensions,
+                ..Default::default()
+            }
+        ).unwrap();
+
+        let _debug_callback = unsafe {
+            DebugUtilsMessenger::new(
+                &instance,
+                &DebugUtilsMessengerCreateInfo {
+                    message_severity: DebugUtilsMessageSeverity::ERROR
+                        | DebugUtilsMessageSeverity::WARNING
+                        | DebugUtilsMessageSeverity::INFO
+                        | DebugUtilsMessageSeverity::VERBOSE,
+                    message_type: DebugUtilsMessageType::GENERAL
+                        | DebugUtilsMessageType::VALIDATION
+                        | DebugUtilsMessageType::PERFORMANCE,
+                    ..DebugUtilsMessengerCreateInfo::new(&DebugUtilsMessengerCallback::new(
+                        |message_severity, message_type, callback_data| {
+                            let severity = if message_severity
+                                .intersects(DebugUtilsMessageSeverity::ERROR)
+                            {
+                                "error"
+                            } else if message_severity.intersects(DebugUtilsMessageSeverity::WARNING) {
+                                "warning"
+                            } else if message_severity.intersects(DebugUtilsMessageSeverity::INFO) {
+                                "information"
+                            } else if message_severity.intersects(DebugUtilsMessageSeverity::VERBOSE) {
+                                "verbose"
+                            } else {
+                                panic!("no-impl");
+                            };
+
+                            let ty = if message_type.intersects(DebugUtilsMessageType::GENERAL) {
+                                "general"
+                            } else if message_type.intersects(DebugUtilsMessageType::VALIDATION) {
+                                "validation"
+                            } else if message_type.intersects(DebugUtilsMessageType::PERFORMANCE) {
+                                "performance"
+                            } else {
+                                panic!("no-impl");
+                            };
+
+                            println!(
+                                "{} {} {}: {}",
+                                callback_data.message_id_name.unwrap_or("unknown"),
+                                ty,
+                                severity,
+                                callback_data.message
+                            );
+                        },
+                    ))
+                },
+            )
+        }
+        .ok();
+
+        let mut device_extensions = DeviceExtensions {
+            khr_swapchain: true,
+            khr_storage_buffer_storage_class: true,
+            ..BindlessContext::required_extensions(&instance)
+        };
+
+        let device_features = BindlessContext::required_features(&instance);
+
+
+        let (physical_device, queue_family_index) = instance
+            .enumerate_physical_devices()
+            .unwrap()
+            .filter(|p| {
+                p.api_version() >= Version::V1_1 || p.supported_extensions().khr_maintenance2
+            })
+            .filter(|p| {
+                p.supported_extensions().contains(&device_extensions)
+                    && p.supported_features().contains(&device_features)
+            })
+            .filter_map(|p| {
+                p.queue_family_properties()
+                    .iter()
+                    .enumerate()
+                    .position(|(i, q)| {
+                        // fixme: devices do not always have a graphics/compute with present.
+                        // this should be two checks, one for compute and one for graphics.
+                        // +transfer?
+                        q.queue_flags.intersects(QueueFlags::GRAPHICS | QueueFlags::COMPUTE)
+                            && p.presentation_support(i as u32, event_loop)
+                    })
+                    .map(|i| (p, i as u32))
+            })
+            .min_by_key(|(p, _)| {
+                match p.properties().device_type {
+                    PhysicalDeviceType::DiscreteGpu => 0,
+                    PhysicalDeviceType::IntegratedGpu => 1,
+                    PhysicalDeviceType::VirtualGpu => 2,
+                    PhysicalDeviceType::Cpu => 3,
+                    PhysicalDeviceType::Other => 4,
+                    _ => 5,
+                }
+            })
+            .expect("no suitable physical device found");
+
+        // Some little debug infos.
         println!(
             "Using device: {} (type: {:?})",
-            context.device().physical_device().properties().device_name,
-            context.device().physical_device().properties().device_type,
+            physical_device.properties().device_name,
+            physical_device.properties().device_type,
         );
 
-        let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
-            context.device().clone(),
-            Default::default(),
-        ));
+        if physical_device.api_version() < Version::V1_1 {
+            device_extensions.khr_maintenance2 = true;
+        }
 
+        if physical_device.api_version() < Version::V1_2
+            && physical_device.supported_extensions().khr_image_format_list
+        {
+            device_extensions.khr_image_format_list = true;
+        }
+
+        let (device, mut queues) = Device::new(
+            // Which physical device to connect to.
+            &physical_device,
+            &DeviceCreateInfo {
+                enabled_extensions: &device_extensions,
+                enabled_features: &device_features,
+                // todo: get compute queue also +transfer?
+                queue_create_infos: &[QueueCreateInfo {
+                    queue_family_index,
+                    ..Default::default()
+                }],
+
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let queue = queues.next().unwrap();
+
+        let resources = Resources::new(
+            &device,
+            &ResourcesCreateInfo {
+                bindless_context: Some(&Default::default()),
+                ..Default::default()
+        }).unwrap();
+
+        let flight_id = resources.create_flight(MAX_FRAMES_IN_FLIGHT).unwrap();
+
+        App { instance, device, queue, resources, flight_id, rcx: None, _debug_callback }
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        let bcx = self.resources.bindless_context().unwrap();
+
+        let window = Arc::new(
+            event_loop
+                .create_window(Window::default_attributes())
+                .unwrap(),
+        );
+
+        let surface = Surface::from_window(&self.instance, &window).unwrap();
+        let window_size = window.inner_size();
+
+        let swapchain_format;
+        let swapchain_id = {
+
+            let surface_capabilities = self
+                .device
+                .physical_device()
+                .surface_capabilities(&surface, &Default::default())
+                .unwrap();
+
+            (swapchain_format, _) = self
+                .device
+                .physical_device()
+                .surface_formats(&surface, &Default::default())
+                .unwrap()[0];
+
+            self.resources
+                .create_swapchain(
+                    &surface,
+                    &SwapchainCreateInfo {
+                        min_image_count: surface_capabilities
+                            .min_image_count
+                            .max(MIN_SWAPCHAIN_IMAGES),
+
+                        image_format: swapchain_format,
+
+                        image_extent: window_size.into(),
+
+                        image_usage: ImageUsage::COLOR_ATTACHMENT,
+
+                        composite_alpha: surface_capabilities
+                            .supported_composite_alpha
+                            .into_iter()
+                            .next()
+                            .unwrap(),
+
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        };
+
+        let viewport = Viewport {
+            offset: [0.0, 0.0],
+            extent: window_size.into(),
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+
+        let mut task_graph = TaskGraph::new(&self.resources);
+
+        let virtual_src_image_id = task_graph.add_image(
+            &ImageCreateInfo {
+                image_type: vulkano::image::ImageType::Dim2d,
+                format: vulkano::format::Format::R8G8B8A8_UNORM,
+                extent: [1024, 1024, 1],
+                // todo: maybe remove storage from src_img
+                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                ..Default::default()
+            }
+        );
+
+        let virtual_dst_image_id = task_graph.add_image(
+            &ImageCreateInfo {
+                image_type: vulkano::image::ImageType::Dim2d,
+                format: vulkano::format::Format::R8G8B8A8_UNORM,
+                extent: [1024, 1024, 1],
+                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                ..Default::default()
+            }
+        );
+
+        let src_image_id = self.resources.create_image(
+            &ImageCreateInfo {
+                flags: ImageCreateFlags::MUTABLE_FORMAT,
+                image_type: vulkano::image::ImageType::Dim2d,
+                format: vulkano::format::Format::R8G8B8A8_UNORM,
+                extent: [1024, 1024, 1],
+                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                ..Default::default()
+            },
+            &Default::default()
+        ).unwrap();
+
+        let dst_image_id = self.resources.create_image(
+            &ImageCreateInfo {
+                flags: ImageCreateFlags::MUTABLE_FORMAT,
+                image_type: vulkano::image::ImageType::Dim2d,
+                format: vulkano::format::Format::R8G8B8A8_UNORM,
+                extent: [1024, 1024, 1],
+                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                ..Default::default()
+            },
+            &Default::default()
+        ).unwrap();
+
+        let src_sampler_id = bcx
+            .global_set()
+            .create_sampler(&SamplerCreateInfo {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                mipmap_mode: vulkano::image::sampler::SamplerMipmapMode::Nearest,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let dst_sampler_id = bcx
+            .global_set()
+            .create_sampler(&SamplerCreateInfo {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                mipmap_mode: vulkano::image::sampler::SamplerMipmapMode::Nearest,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let src_storage_image_id = bcx
+            .global_set()
+            .create_storage_image(
+                src_image_id,
+                &ImageViewCreateInfo {
+                    format: vulkano::format::Format::R8G8B8A8_UNORM,
+                    subresource_range: ImageSubresourceRange {
+                        aspects: ImageAspects::COLOR,
+                        ..Default::default()
+                    },
+                    usage: ImageUsage::STORAGE,
+                    ..Default::default()
+                },
+                ImageLayout::General
+            )
+            .unwrap();
+
+        let dst_storage_image_id = bcx
+            .global_set()
+            .create_storage_image(
+                dst_image_id,
+                &ImageViewCreateInfo {
+                    format: vulkano::format::Format::R8G8B8A8_UNORM,
+                    subresource_range: ImageSubresourceRange {
+                        aspects: ImageAspects::COLOR,
+                        ..Default::default()
+                    },
+                    usage: ImageUsage::STORAGE,
+                    ..Default::default()
+                },
+                ImageLayout::General
+            )
+            .unwrap();
+
+        let src_sampled_image_id = bcx
+            .global_set()
+            .create_sampled_image(
+                src_image_id,
+                &ImageViewCreateInfo {
+                    format: vulkano::format::Format::R8G8B8A8_UNORM,
+                    subresource_range: ImageSubresourceRange {
+                        aspects: ImageAspects::COLOR,
+                        ..Default::default()
+                    },
+                    usage: ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                    ..Default::default()
+                },
+                ImageLayout::General
+            )
+            .unwrap();
+
+        let dst_sampled_image_id = bcx
+            .global_set()
+            .create_sampled_image(
+                dst_image_id,
+                &ImageViewCreateInfo {
+                    format: vulkano::format::Format::R8G8B8A8_UNORM,
+                    subresource_range: ImageSubresourceRange {
+                        aspects: ImageAspects::COLOR,
+                        ..Default::default()
+                    },
+                    usage: ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                    ..Default::default()
+                },
+                ImageLayout::General
+            )
+            .unwrap();
+
+        let compute_node_id = task_graph
+            .create_task_node(
+                "Compute",
+                vulkano_taskgraph::QueueFamilyType::Compute,
+                ComputeTask::new(&self)
+            )
+            .image_access(
+                virtual_dst_image_id,
+                AccessTypes::COMPUTE_SHADER_STORAGE_WRITE,
+                resource::ImageLayoutType::General
+            )
+            .image_access(
+                virtual_src_image_id,
+                AccessTypes::COMPUTE_SHADER_SAMPLED_READ,
+                resource::ImageLayoutType::General
+            )
+            .build();
+
+        let virtual_swapchain_id = task_graph.add_swapchain(&SwapchainCreateInfo {
+            image_format: swapchain_format,
+            ..Default::default()
+        });
+
+        let virtual_frame_buffer_id = task_graph.add_framebuffer();
+
+        let triangle_node_id = task_graph
+            .create_task_node(
+                "Triangle",
+                vulkano_taskgraph::QueueFamilyType::Graphics,
+                TriangleTask::new(self, virtual_swapchain_id)
+            )
+            .framebuffer(virtual_frame_buffer_id)
+            .color_attachment(
+                virtual_swapchain_id.current_image_id(),
+                AccessTypes::COLOR_ATTACHMENT_WRITE,
+                resource::ImageLayoutType::Optimal,
+                &AttachmentInfo {
+                    clear: true,
+                    ..Default::default()
+                },
+            ).image_access(
+                virtual_dst_image_id,
+                AccessTypes::FRAGMENT_SHADER_SAMPLED_READ,
+                resource::ImageLayoutType::General
+            ).build();
+
+        task_graph.add_edge(compute_node_id, triangle_node_id).unwrap();
+
+        let mut task_graph = unsafe {
+            task_graph.compile(&CompileInfo {
+                queues: &[&self.queue],
+                present_queue: Some(&self.queue),
+                flight_id: self.flight_id,
+                ..Default::default()
+            })
+        }
+        .unwrap();
+
+        let triangle_node = task_graph.task_node_mut(triangle_node_id).unwrap();
+        let subpass = triangle_node.subpass().unwrap().clone();
+        triangle_node
+            .task_mut()
+            .downcast_mut::<TriangleTask>()
+            .unwrap()
+            .create_pipeline(self, &subpass);
+
+        let recreate_swapchain = false;
+
+        self.rcx = Some(RenderContext {
+            window,
+            swapchain_id,
+            viewport,
+            recreate_swapchain,
+            task_graph,
+            virtual_swapchain_id,
+            virtual_src_image_id,
+            virtual_dst_image_id,
+            src_image_id,
+            dst_image_id,
+            src_sampler_id,
+            dst_sampler_id,
+            src_storage_image_id,
+            dst_storage_image_id,
+            src_sampled_image_id,
+            dst_sampled_image_id,
+        });
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    )
+    {
+        let rcx = self.rcx.as_mut().unwrap();
+
+        match event {
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
+            WindowEvent::Resized(_) => {
+                rcx.recreate_swapchain = true;
+            }
+            WindowEvent::RedrawRequested => {
+                let window_size = rcx.window.inner_size();
+
+                if window_size.width == 0 || window_size.height == 0 {
+                    return;
+                }
+
+                if rcx.recreate_swapchain {
+                    rcx.swapchain_id = self
+                        .resources
+                        .recreate_swapchain(rcx.swapchain_id, |create_info| SwapchainCreateInfo {
+                            image_extent: window_size.into(),
+                            ..*create_info
+                        })
+                        .expect("failed to recreate swapchain");
+
+                        rcx.viewport.extent = window_size.into();
+                        rcx.recreate_swapchain = false;
+                }
+
+                let flight = self.resources.flight(self.flight_id);
+                flight.wait(None).unwrap();
+
+                let resource_map = resource_map!(&rcx.task_graph,
+                    rcx.virtual_swapchain_id => rcx.swapchain_id,
+                    rcx.virtual_src_image_id => rcx.src_image_id,
+                    rcx.virtual_dst_image_id => rcx.dst_image_id,
+                ).unwrap();
+
+                match unsafe {
+                    rcx.task_graph.execute(resource_map, rcx, || rcx.window.pre_present_notify())
+                } {
+                    Ok(()) => {
+                        mem::swap(&mut rcx.src_image_id, &mut rcx.dst_image_id);
+                        mem::swap(&mut rcx.src_sampler_id, &mut rcx.dst_sampler_id);
+                        mem::swap(&mut rcx.src_storage_image_id, &mut rcx.dst_storage_image_id);
+                        mem::swap(&mut rcx.src_sampled_image_id, &mut rcx.dst_sampled_image_id);
+                    },
+                    Err(ExecuteError::Swapchain {
+                        error: VulkanError::OutOfDate,
+                        ..
+                    }) => {
+                        rcx.recreate_swapchain = true;
+                    },
+                    Err(e) => {
+                        panic!("failed to execute next frame: {e:?}");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        let rcx = self.rcx.as_mut().unwrap();
+        rcx.window.request_redraw();
+    }
+}
+
+
+#[derive(Clone, Copy, BufferContents, Vertex)]
+#[repr(C)]
+struct MyVertex {
+    #[format(R32G32_SFLOAT)]
+    position: [f32; 2],
+}
+
+struct ComputeTask {
+    pipeline: Arc<ComputePipeline>,
+    // src_img: Id<Image>,
+    // dst_img: Id<Image>,
+    // src_sampler: SamplerId,
+}
+
+impl ComputeTask {
+    pub fn new(app: &App) -> Self {
+        let bcx = app.resources.bindless_context().unwrap();
+
+        let pipeline = {
+            let cs = unsafe { cs::load(&app.device) }
+                .unwrap()
+                .entry_point("main")
+                .unwrap();
+
+            let stage = PipelineShaderStageCreateInfo::new(&cs);
+
+            let layout = bcx
+                .pipeline_layout_from_stages(slice::from_ref(&stage))
+                .unwrap();
+
+            ComputePipeline::new(
+                &app.device,
+                None,
+                &ComputePipelineCreateInfo::new(stage, &layout)
+            ).unwrap()
+        };
+
+        Self { pipeline }
+    }
+}
+
+impl Task for ComputeTask {
+    type World = RenderContext;
+
+    unsafe fn execute(
+        &self,
+        cbf: &mut vulkano_taskgraph::command_buffer::RecordingCommandBuffer<'_>,
+        _tcx: &mut TaskContext<'_>,
+        world: &Self::World,
+    ) -> vulkano_taskgraph::TaskResult
+    {
+        unsafe { cbf.bind_pipeline_compute(&self.pipeline) };
+
+        unsafe { cbf.push_constants(self.pipeline.layout(), 0, &cs::PushConstantData {
+            sampler_id: world.src_sampler_id,
+            src_image: world.src_sampled_image_id,
+            dst_image: world.dst_storage_image_id,
+        }) };
+
+        unsafe { cbf.dispatch([128, 128, 1]) };
+
+        Ok(())
+    }
+}
+
+struct TriangleTask {
+    pipeline: Option<Arc<GraphicsPipeline>>,
+    vertex_buffer_id: Id<Buffer>,
+    swapchain_id: Id<Swapchain>,
+}
+
+impl TriangleTask {
+    fn new(app: &mut App, swapchain_id: Id<Swapchain>) -> Self {
         let vertices = [
             MyVertex {
                 position: [-0.5, -0.25],
@@ -65,90 +702,49 @@ impl App {
             },
         ];
 
-        let vertex_buffer = Buffer::from_iter(
-            context.memory_allocator().clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vertices,
-        )
-        .unwrap();
-
-        App { context, windows, command_buffer_allocator, vertex_buffer, rcx: None, }
-    }
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        if let Some(primary_window_id) = self.windows.primary_window_id() {
-            self.windows.remove_renderer(primary_window_id);
-        }
-
-        self.windows
-            .create_window(event_loop, &self.context, &Default::default(), |_| {});
-        let window_renderer = self.windows.get_primary_renderer_mut().unwrap();
-        let window_size = window_renderer.window().inner_size();
-
-        mod vs {
-            vulkano_shaders::shader! {
-                ty: "vertex",
-                src: r"
-                    #version 450
-
-                    layout(location = 0) in vec2 position;
-
-                    void main() {
-                        gl_Position = vec4(position, 0.0, 1.0);
-                    }
-                ",
-            }
-        }
-
-        mod fs {
-            vulkano_shaders::shader! {
-                ty: "fragment",
-                src: r"
-                    #version 450
-
-                    layout(location = 0) out vec4 f_color;
-
-                    void main() {
-                        f_color = vec4(1.0, 0.0, 0.0, 1.0);
-                    }
-                ",
-            }
-        }
-
-        let render_pass = vulkano::single_pass_renderpass!(
-            self.context.device().clone(),
-            attachments: {
-                color: {
-                    format: window_renderer.swapchain_format(),
-                    samples: 1,
-                    load_op: Clear,
-                    store_op: Store,
+        let vertex_buffer_id = app
+            .resources
+            .create_buffer(
+                &BufferCreateInfo {
+                    usage: BufferUsage::VERTEX_BUFFER,
+                    ..Default::default()
                 },
-            },
-            pass: {
-                color: [color],
-                depth_stencil: {},
-            },
-        ).unwrap();
+                &AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    ..Default::default()
+                },
+                DeviceLayout::for_value(vertices.as_slice()).unwrap()
+            ).unwrap();
 
-        let framebuffers = window_size_dependent_setup(window_renderer.swapchain_image_views(), &render_pass);
+        unsafe {
+            vulkano_taskgraph::execute(
+                &app.queue,
+                &app.resources,
+                app.flight_id,
+                |_, tcx| {
+                    tcx.try_write_buffer::<[MyVertex]>(vertex_buffer_id, ..)?
+                        .copy_from_slice(&vertices);
+                    Ok(())
+                },
+                [(vertex_buffer_id, HostAccessType::Write)],
+                // todo: access types below
+                [],
+                []
+            )
+        }.unwrap();
 
+        let pipeline = None;
+
+        Self { pipeline, vertex_buffer_id, swapchain_id }
+    }
+
+    pub fn create_pipeline(&mut self, app: &App, subpass: &Subpass) {
         let pipeline = {
-            let vs = vs::load(self.context.device().clone())
+            let vs = unsafe { vs::load(&app.device) }
                 .unwrap()
                 .entry_point("main")
                 .unwrap();
-            let fs = fs::load(self.context.device().clone())
+            let fs = unsafe { fs::load(&app.device) }
                 .unwrap()
                 .entry_point("main")
                 .unwrap();
@@ -156,158 +752,89 @@ impl ApplicationHandler for App {
             let vertex_input_state = MyVertex::per_vertex().definition(&vs).unwrap();
 
             let stages = [
-                PipelineShaderStageCreateInfo::new(vs),
-                PipelineShaderStageCreateInfo::new(fs),
+                PipelineShaderStageCreateInfo::new(&vs),
+                PipelineShaderStageCreateInfo::new(&fs),
             ];
 
-            let layout = PipelineLayout::new(
-                self.context.device().clone(),
-                PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                    .into_pipeline_layout_create_info(self.context.device().clone())
-                    .unwrap(),
-            ).unwrap();
+            let bcx = app.resources.bindless_context().unwrap();
 
-            let subass = Subpass::from(render_pass.clone(), 0).unwrap();
+            let layout = bcx.pipeline_layout_from_stages(&stages).unwrap();
 
             GraphicsPipeline::new(
-                self.context.device().clone(),
+                &app.device,
                 None,
-                GraphicsPipelineCreateInfo {
-                    stages: stages.into_iter().collect(),
-                    vertex_input_state: Some(vertex_input_state),
-                    input_assembly_state: Some(InputAssemblyState::default()),
-                    viewport_state: Some(ViewportState::default()),
-                    rasterization_state: Some(RasterizationState::default()),
-                    multisample_state: Some(MultisampleState::default()),
-                    color_blend_state: Some(ColorBlendState::with_attachment_states(
-                        subass.num_color_attachments(),
-                        ColorBlendAttachmentState::default(),
-                    )),
-                    dynamic_state: [DynamicState::Viewport].into_iter().collect(),
-                    subpass: Some(subass.into()),
-                    ..GraphicsPipelineCreateInfo::layout(layout)
+                &GraphicsPipelineCreateInfo {
+                    stages: &stages,
+                    vertex_input_state: Some(&vertex_input_state),
+                    input_assembly_state: Some(&InputAssemblyState::default()),
+                    viewport_state: Some(&ViewportState::default()),
+                    rasterization_state: Some(&RasterizationState::default()),
+                    multisample_state: Some(&MultisampleState::default()),
+                    color_blend_state: Some(&ColorBlendState {
+                        attachments: &[ColorBlendAttachmentState::default()],
+                        ..Default::default()
+                    }),
+                    dynamic_state: &[DynamicState::Viewport],
+                    subpass: Some(subpass.into()),
+                    ..GraphicsPipelineCreateInfo::new(&layout)
                 }
             ).unwrap()
         };
 
-        let viewport = Viewport {
-            offset: [0.0, 0.0],
-            extent: window_size.into(),
-            depth_range: 0.0..=1.0,
-        };
+        self.pipeline = Some(pipeline);
+    }
+}
 
-        self.rcx = Some(RenderContext {
-            render_pass,
-            framebuffers,
-            pipeline,
-            viewport
-        });
+impl Task for TriangleTask {
+    type World = RenderContext;
 
+    fn clear_values(&self, clear_values: &mut ClearValues<'_>, _world: &Self::World) {
+        clear_values.set(
+            self.swapchain_id.current_image_id(),
+            [ 2.0 / 255.0, 6.0 / 255.0, 24.0 / 255.0, 1.0 ]
+        );
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-        window_id: winit::window::WindowId,
-        event: winit::event::WindowEvent,
-    )
-    {
-        let window_renderer = self.windows.get_primary_renderer_mut().unwrap();
-        let rcx = self.rcx.as_mut().unwrap();
+    unsafe fn execute(
+        &self,
+        cbf: &mut vulkano_taskgraph::command_buffer::RecordingCommandBuffer<'_>,
+        _tcx: &mut TaskContext<'_>,
+        rcx: &Self::World,
+    ) -> vulkano_taskgraph::TaskResult {
+        unsafe { cbf.set_viewport(0, slice::from_ref(&rcx.viewport)) };
 
-        match event {
-            WindowEvent::CloseRequested => {
-                event_loop.exit();
-            }
-            WindowEvent::Resized(_) => {
-                window_renderer.resize();
-            }
-            WindowEvent::RedrawRequested => {
-                let window_size = window_renderer.window().inner_size();
+        unsafe { cbf.bind_pipeline_graphics(self.pipeline.as_ref().unwrap()) };
+        unsafe { cbf.bind_vertex_buffers(0, &[self.vertex_buffer_id], &[0], &[], &[]) };
 
-                if window_size.width == 0 || window_size.height == 0 {
-                    return;
-                }
+        unsafe { cbf.push_constants(self.pipeline.as_ref().unwrap().layout(), 0, &fs::PushConstantData {
+            sampler_id: rcx.dst_sampler_id,
+            dst_image: rcx.dst_sampled_image_id,
+        }) };
 
-                let previous_frame_end = window_renderer.acquire(Some(Duration::from_millis(1000)), |swapchain_images| {
-                    rcx.framebuffers = window_size_dependent_setup(swapchain_images, &rcx.render_pass);
-                    rcx.viewport.extent = window_size.into();
-                }).unwrap();
+        unsafe { cbf.draw(3, 1, 0, 0) };
 
-                let mut builder = AutoCommandBufferBuilder::primary(
-                    self.command_buffer_allocator.clone(),
-                    self.context.graphics_queue().queue_family_index(),
-                    CommandBufferUsage::OneTimeSubmit
-                ).unwrap();
-
-
-                builder
-                    .begin_render_pass(
-                        RenderPassBeginInfo {
-                            clear_values: vec![Some([0.0, 0.0, 1.0, 1.0].into())],
-                            ..RenderPassBeginInfo::framebuffer(
-                                rcx.framebuffers[window_renderer.image_index() as usize].clone(),
-                            )
-                        },
-                        SubpassBeginInfo {
-                            contents: SubpassContents::Inline,
-                            ..Default::default()
-                        },
-                    ).unwrap()
-                    .set_viewport(0, [rcx.viewport.clone()].into_iter().collect())
-                    .unwrap()
-                    .bind_pipeline_graphics(rcx.pipeline.clone())
-                    .unwrap()
-                    .bind_vertex_buffers(0, self.vertex_buffer.clone())
-                    .unwrap();
-
-                unsafe { builder.draw(self.vertex_buffer.len() as u32, 1, 0, 0) }.unwrap();
-
-                builder
-                    .end_render_pass(Default::default())
-                    .unwrap();
-
-                let command_buffer = builder.build().unwrap();
-
-                let future = previous_frame_end
-                    .then_execute(self.context.graphics_queue().clone(), command_buffer)
-                    .unwrap()
-                    .boxed();
-
-                window_renderer.present(future, false);
-            }
-            _ => {}
-        }
-    }
-
-    fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
-        self.windows.get_primary_renderer_mut().unwrap().window().request_redraw();
+        Ok(())
     }
 }
 
 
-#[derive(BufferContents, Vertex)]
-#[repr(C)]
-struct MyVertex {
-    #[format(R32G32_SFLOAT)]
-    position: [f32; 2],
+mod cs {
+    vulkano_shaders::shader! {
+        ty: "compute",
+        path: "shader.comp",
+    }
 }
 
-fn window_size_dependent_setup(
-    swapchain_images: &[Arc<ImageView>],
-    render_pass: &Arc<RenderPass>,
-) -> Vec<Arc<Framebuffer>> {
-    swapchain_images
-        .iter()
-        .map(|swapchain_image| {
-            Framebuffer::new(
-                render_pass.clone(),
-                FramebufferCreateInfo {
-                    attachments: vec![swapchain_image.clone()],
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>()
+mod vs {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "shader.vert",
+    }
+}
+
+mod fs {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "shader.frag",
+    }
 }
