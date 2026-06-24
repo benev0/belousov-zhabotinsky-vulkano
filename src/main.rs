@@ -1,44 +1,62 @@
+use std::default::Default;
 use std::error::Error;
 use std::mem;
-use std::sync::Arc;
-use std::default::Default;
 use std::slice;
+use std::sync::Arc;
 
 use vulkano::Version;
+use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+use vulkano::device::physical::PhysicalDeviceType;
+use vulkano::device::{
+    Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
+};
+use vulkano::image::ImageAspects;
 use vulkano::image::ImageCreateFlags;
 use vulkano::image::ImageLayout;
-use vulkano::image::ImageAspects;
 use vulkano::image::ImageSubresourceRange;
 use vulkano::image::sampler::Filter;
 use vulkano::image::sampler::SamplerCreateInfo;
 use vulkano::image::view::ImageViewCreateInfo;
+use vulkano::image::{Image, ImageCreateInfo, ImageUsage};
 use vulkano::instance::InstanceExtensions;
 use vulkano::instance::debug::DebugUtilsMessageSeverity;
 use vulkano::instance::debug::DebugUtilsMessageType;
 use vulkano::instance::debug::DebugUtilsMessenger;
 use vulkano::instance::debug::DebugUtilsMessengerCallback;
 use vulkano::instance::debug::DebugUtilsMessengerCreateInfo;
-use vulkano::{VulkanError, VulkanLibrary};
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
-use vulkano::device::physical::PhysicalDeviceType;
-use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags};
-use vulkano::image::{Image, ImageCreateInfo, ImageUsage};
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 use vulkano::memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter};
-use vulkano::pipeline::{ComputePipeline, Pipeline};
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
+use vulkano::pipeline::{ComputePipeline, Pipeline};
 use vulkano::swapchain::{Surface, Swapchain, SwapchainCreateInfo};
-use vulkano::{buffer::BufferContents, pipeline::{ DynamicState, GraphicsPipeline, PipelineShaderStageCreateInfo, graphics::{GraphicsPipelineCreateInfo, color_blend::{ColorBlendAttachmentState, ColorBlendState}, input_assembly::InputAssemblyState, multisample::MultisampleState, rasterization::RasterizationState, vertex_input::{Vertex, VertexDefinition}, viewport::{Viewport, ViewportState}}}, render_pass::Subpass};
+use vulkano::{VulkanError, VulkanLibrary};
+use vulkano::{
+    buffer::BufferContents,
+    pipeline::{
+        DynamicState, GraphicsPipeline, PipelineShaderStageCreateInfo,
+        graphics::{
+            GraphicsPipelineCreateInfo,
+            color_blend::{ColorBlendAttachmentState, ColorBlendState},
+            input_assembly::InputAssemblyState,
+            multisample::MultisampleState,
+            rasterization::RasterizationState,
+            vertex_input::{Vertex, VertexDefinition},
+            viewport::{Viewport, ViewportState},
+        },
+    },
+    render_pass::Subpass,
+};
 use vulkano_taskgraph::descriptor_set::BindlessContext;
 use vulkano_taskgraph::descriptor_set::SamplerId;
+use vulkano_taskgraph::graph::{
+    AttachmentInfo, CompileInfo, ExecutableTaskGraph, ExecuteError, TaskGraph,
+};
 use vulkano_taskgraph::resource::ResourcesCreateInfo;
-use vulkano_taskgraph::{ClearValues, Id, Task, TaskContext, resource_map};
-use vulkano_taskgraph::graph::{AttachmentInfo, CompileInfo, ExecutableTaskGraph, ExecuteError, TaskGraph};
 use vulkano_taskgraph::resource::{self, AccessTypes, Flight, HostAccessType, Resources};
+use vulkano_taskgraph::{ClearValues, Id, Task, TaskContext, resource_map};
 use winit::event_loop::ControlFlow;
 use winit::window::Window;
 use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::EventLoop};
-
 
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 const MIN_SWAPCHAIN_IMAGES: u32 = MAX_FRAMES_IN_FLIGHT + 1;
@@ -50,9 +68,8 @@ struct App {
     resources: Arc<Resources>,
     flight_id: Id<Flight>,
     rcx: Option<RenderContext>,
-    _debug_callback: Option<DebugUtilsMessenger>
+    _debug_callback: Option<DebugUtilsMessenger>,
 }
-
 
 struct RenderContext {
     window: Arc<Window>,
@@ -71,14 +88,7 @@ struct RenderContext {
     dst_sampled_image_id: vulkano_taskgraph::descriptor_set::SampledImageId,
     virtual_src_image_id: Id<Image>,
     virtual_dst_image_id: Id<Image>,
-    // render_pass: Arc<RenderPass>,
-    // framebuffers: Vec<Arc<Framebuffer>>,
-    // graphics_pipeline: Arc<GraphicsPipeline>,
-    // compute_pipeline: Arc<ComputePipeline>,
-    // first_image: bool,
-    // textures: [Arc<ImageView>; 2],
 }
-
 
 fn main() -> Result<(), impl Error> {
     let event_loop = EventLoop::new()?;
@@ -106,8 +116,9 @@ impl App {
                 enabled_layers: &layers,
                 enabled_extensions: &required_extensions,
                 ..Default::default()
-            }
-        ).unwrap();
+            },
+        )
+        .unwrap();
 
         let _debug_callback = unsafe {
             DebugUtilsMessenger::new(
@@ -126,11 +137,15 @@ impl App {
                                 .intersects(DebugUtilsMessageSeverity::ERROR)
                             {
                                 "error"
-                            } else if message_severity.intersects(DebugUtilsMessageSeverity::WARNING) {
+                            } else if message_severity
+                                .intersects(DebugUtilsMessageSeverity::WARNING)
+                            {
                                 "warning"
                             } else if message_severity.intersects(DebugUtilsMessageSeverity::INFO) {
                                 "information"
-                            } else if message_severity.intersects(DebugUtilsMessageSeverity::VERBOSE) {
+                            } else if message_severity
+                                .intersects(DebugUtilsMessageSeverity::VERBOSE)
+                            {
                                 "verbose"
                             } else {
                                 panic!("no-impl");
@@ -168,7 +183,6 @@ impl App {
 
         let device_features = BindlessContext::required_features(&instance);
 
-
         let (physical_device, queue_family_index) = instance
             .enumerate_physical_devices()
             .unwrap()
@@ -187,20 +201,19 @@ impl App {
                         // fixme: devices do not always have a graphics/compute with present.
                         // this should be two checks, one for compute and one for graphics.
                         // +transfer?
-                        q.queue_flags.intersects(QueueFlags::GRAPHICS | QueueFlags::COMPUTE)
+                        q.queue_flags
+                            .intersects(QueueFlags::GRAPHICS | QueueFlags::COMPUTE)
                             && p.presentation_support(i as u32, event_loop)
                     })
                     .map(|i| (p, i as u32))
             })
-            .min_by_key(|(p, _)| {
-                match p.properties().device_type {
-                    PhysicalDeviceType::DiscreteGpu => 0,
-                    PhysicalDeviceType::IntegratedGpu => 1,
-                    PhysicalDeviceType::VirtualGpu => 2,
-                    PhysicalDeviceType::Cpu => 3,
-                    PhysicalDeviceType::Other => 4,
-                    _ => 5,
-                }
+            .min_by_key(|(p, _)| match p.properties().device_type {
+                PhysicalDeviceType::DiscreteGpu => 0,
+                PhysicalDeviceType::IntegratedGpu => 1,
+                PhysicalDeviceType::VirtualGpu => 2,
+                PhysicalDeviceType::Cpu => 3,
+                PhysicalDeviceType::Other => 4,
+                _ => 5,
             })
             .expect("no suitable physical device found");
 
@@ -245,11 +258,21 @@ impl App {
             &ResourcesCreateInfo {
                 bindless_context: Some(&Default::default()),
                 ..Default::default()
-        }).unwrap();
+            },
+        )
+        .unwrap();
 
         let flight_id = resources.create_flight(MAX_FRAMES_IN_FLIGHT).unwrap();
 
-        App { instance, device, queue, resources, flight_id, rcx: None, _debug_callback }
+        App {
+            instance,
+            device,
+            queue,
+            resources,
+            flight_id,
+            rcx: None,
+            _debug_callback,
+        }
     }
 }
 
@@ -268,7 +291,6 @@ impl ApplicationHandler for App {
 
         let swapchain_format;
         let swapchain_id = {
-
             let surface_capabilities = self
                 .device
                 .physical_device()
@@ -288,13 +310,9 @@ impl ApplicationHandler for App {
                         min_image_count: surface_capabilities
                             .min_image_count
                             .max(MIN_SWAPCHAIN_IMAGES),
-
                         image_format: swapchain_format,
-
                         image_extent: window_size.into(),
-
                         image_usage: ImageUsage::COLOR_ATTACHMENT,
-
                         composite_alpha: surface_capabilities
                             .supported_composite_alpha
                             .into_iter()
@@ -316,50 +334,52 @@ impl ApplicationHandler for App {
 
         let mut task_graph = TaskGraph::new(&self.resources);
 
-        let virtual_src_image_id = task_graph.add_image(
-            &ImageCreateInfo {
-                image_type: vulkano::image::ImageType::Dim2d,
-                format: vulkano::format::Format::R8G8B8A8_UNORM,
-                extent: [1024, 1024, 1],
-                // todo: maybe remove storage from src_img
-                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
-                ..Default::default()
-            }
-        );
+        let virtual_src_image_id = task_graph.add_image(&ImageCreateInfo {
+            image_type: vulkano::image::ImageType::Dim2d,
+            format: vulkano::format::Format::R8G8B8A8_UNORM,
+            extent: [1024, 1024, 1],
+            // todo: maybe remove storage from src_img
+            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+            ..Default::default()
+        });
 
-        let virtual_dst_image_id = task_graph.add_image(
-            &ImageCreateInfo {
-                image_type: vulkano::image::ImageType::Dim2d,
-                format: vulkano::format::Format::R8G8B8A8_UNORM,
-                extent: [1024, 1024, 1],
-                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
-                ..Default::default()
-            }
-        );
+        let virtual_dst_image_id = task_graph.add_image(&ImageCreateInfo {
+            image_type: vulkano::image::ImageType::Dim2d,
+            format: vulkano::format::Format::R8G8B8A8_UNORM,
+            extent: [1024, 1024, 1],
+            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+            ..Default::default()
+        });
 
-        let src_image_id = self.resources.create_image(
-            &ImageCreateInfo {
-                flags: ImageCreateFlags::MUTABLE_FORMAT,
-                image_type: vulkano::image::ImageType::Dim2d,
-                format: vulkano::format::Format::R8G8B8A8_UNORM,
-                extent: [1024, 1024, 1],
-                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
-                ..Default::default()
-            },
-            &Default::default()
-        ).unwrap();
+        let src_image_id = self
+            .resources
+            .create_image(
+                &ImageCreateInfo {
+                    flags: ImageCreateFlags::MUTABLE_FORMAT,
+                    image_type: vulkano::image::ImageType::Dim2d,
+                    format: vulkano::format::Format::R8G8B8A8_UNORM,
+                    extent: [1024, 1024, 1],
+                    usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                    ..Default::default()
+                },
+                &Default::default(),
+            )
+            .unwrap();
 
-        let dst_image_id = self.resources.create_image(
-            &ImageCreateInfo {
-                flags: ImageCreateFlags::MUTABLE_FORMAT,
-                image_type: vulkano::image::ImageType::Dim2d,
-                format: vulkano::format::Format::R8G8B8A8_UNORM,
-                extent: [1024, 1024, 1],
-                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
-                ..Default::default()
-            },
-            &Default::default()
-        ).unwrap();
+        let dst_image_id = self
+            .resources
+            .create_image(
+                &ImageCreateInfo {
+                    flags: ImageCreateFlags::MUTABLE_FORMAT,
+                    image_type: vulkano::image::ImageType::Dim2d,
+                    format: vulkano::format::Format::R8G8B8A8_UNORM,
+                    extent: [1024, 1024, 1],
+                    usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                    ..Default::default()
+                },
+                &Default::default(),
+            )
+            .unwrap();
 
         let src_sampler_id = bcx
             .global_set()
@@ -394,7 +414,7 @@ impl ApplicationHandler for App {
                     usage: ImageUsage::STORAGE,
                     ..Default::default()
                 },
-                ImageLayout::General
+                ImageLayout::General,
             )
             .unwrap();
 
@@ -411,7 +431,7 @@ impl ApplicationHandler for App {
                     usage: ImageUsage::STORAGE,
                     ..Default::default()
                 },
-                ImageLayout::General
+                ImageLayout::General,
             )
             .unwrap();
 
@@ -428,7 +448,7 @@ impl ApplicationHandler for App {
                     usage: ImageUsage::SAMPLED | ImageUsage::STORAGE,
                     ..Default::default()
                 },
-                ImageLayout::General
+                ImageLayout::General,
             )
             .unwrap();
 
@@ -445,7 +465,7 @@ impl ApplicationHandler for App {
                     usage: ImageUsage::SAMPLED | ImageUsage::STORAGE,
                     ..Default::default()
                 },
-                ImageLayout::General
+                ImageLayout::General,
             )
             .unwrap();
 
@@ -453,17 +473,17 @@ impl ApplicationHandler for App {
             .create_task_node(
                 "Compute",
                 vulkano_taskgraph::QueueFamilyType::Compute,
-                ComputeTask::new(&self)
+                ComputeTask::new(&self),
             )
             .image_access(
                 virtual_dst_image_id,
                 AccessTypes::COMPUTE_SHADER_STORAGE_WRITE,
-                resource::ImageLayoutType::General
+                resource::ImageLayoutType::General,
             )
             .image_access(
                 virtual_src_image_id,
                 AccessTypes::COMPUTE_SHADER_SAMPLED_READ,
-                resource::ImageLayoutType::General
+                resource::ImageLayoutType::General,
             )
             .build();
 
@@ -478,7 +498,7 @@ impl ApplicationHandler for App {
             .create_task_node(
                 "Triangle",
                 vulkano_taskgraph::QueueFamilyType::Graphics,
-                TriangleTask::new(self, virtual_swapchain_id)
+                TriangleTask::new(self, virtual_swapchain_id),
             )
             .framebuffer(virtual_frame_buffer_id)
             .color_attachment(
@@ -489,13 +509,17 @@ impl ApplicationHandler for App {
                     clear: true,
                     ..Default::default()
                 },
-            ).image_access(
+            )
+            .image_access(
                 virtual_dst_image_id,
                 AccessTypes::FRAGMENT_SHADER_SAMPLED_READ,
-                resource::ImageLayoutType::General
-            ).build();
+                resource::ImageLayoutType::General,
+            )
+            .build();
 
-        task_graph.add_edge(compute_node_id, triangle_node_id).unwrap();
+        task_graph
+            .add_edge(compute_node_id, triangle_node_id)
+            .unwrap();
 
         let mut task_graph = unsafe {
             task_graph.compile(&CompileInfo {
@@ -542,8 +566,7 @@ impl ApplicationHandler for App {
         event_loop: &winit::event_loop::ActiveEventLoop,
         _window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
-    )
-    {
+    ) {
         let rcx = self.rcx.as_mut().unwrap();
 
         match event {
@@ -569,8 +592,8 @@ impl ApplicationHandler for App {
                         })
                         .expect("failed to recreate swapchain");
 
-                        rcx.viewport.extent = window_size.into();
-                        rcx.recreate_swapchain = false;
+                    rcx.viewport.extent = window_size.into();
+                    rcx.recreate_swapchain = false;
                 }
 
                 let flight = self.resources.flight(self.flight_id);
@@ -580,23 +603,25 @@ impl ApplicationHandler for App {
                     rcx.virtual_swapchain_id => rcx.swapchain_id,
                     rcx.virtual_src_image_id => rcx.src_image_id,
                     rcx.virtual_dst_image_id => rcx.dst_image_id,
-                ).unwrap();
+                )
+                .unwrap();
 
                 match unsafe {
-                    rcx.task_graph.execute(resource_map, rcx, || rcx.window.pre_present_notify())
+                    rcx.task_graph
+                        .execute(resource_map, rcx, || rcx.window.pre_present_notify())
                 } {
                     Ok(()) => {
                         mem::swap(&mut rcx.src_image_id, &mut rcx.dst_image_id);
                         mem::swap(&mut rcx.src_sampler_id, &mut rcx.dst_sampler_id);
                         mem::swap(&mut rcx.src_storage_image_id, &mut rcx.dst_storage_image_id);
                         mem::swap(&mut rcx.src_sampled_image_id, &mut rcx.dst_sampled_image_id);
-                    },
+                    }
                     Err(ExecuteError::Swapchain {
                         error: VulkanError::OutOfDate,
                         ..
                     }) => {
                         rcx.recreate_swapchain = true;
-                    },
+                    }
                     Err(e) => {
                         panic!("failed to execute next frame: {e:?}");
                     }
@@ -611,7 +636,6 @@ impl ApplicationHandler for App {
         rcx.window.request_redraw();
     }
 }
-
 
 #[derive(Clone, Copy, BufferContents, Vertex)]
 #[repr(C)]
@@ -646,8 +670,9 @@ impl ComputeTask {
             ComputePipeline::new(
                 &app.device,
                 None,
-                &ComputePipelineCreateInfo::new(stage, &layout)
-            ).unwrap()
+                &ComputePipelineCreateInfo::new(stage, &layout),
+            )
+            .unwrap()
         };
 
         Self { pipeline }
@@ -662,15 +687,20 @@ impl Task for ComputeTask {
         cbf: &mut vulkano_taskgraph::command_buffer::RecordingCommandBuffer<'_>,
         _tcx: &mut TaskContext<'_>,
         world: &Self::World,
-    ) -> vulkano_taskgraph::TaskResult
-    {
+    ) -> vulkano_taskgraph::TaskResult {
         unsafe { cbf.bind_pipeline_compute(&self.pipeline) };
 
-        unsafe { cbf.push_constants(self.pipeline.layout(), 0, &cs::PushConstantData {
-            sampler_id: world.src_sampler_id,
-            src_image: world.src_sampled_image_id,
-            dst_image: world.dst_storage_image_id,
-        }) };
+        unsafe {
+            cbf.push_constants(
+                self.pipeline.layout(),
+                0,
+                &cs::PushConstantData {
+                    sampler_id: world.src_sampler_id,
+                    src_image: world.src_sampled_image_id,
+                    dst_image: world.dst_storage_image_id,
+                },
+            )
+        };
 
         unsafe { cbf.dispatch([128, 128, 1]) };
 
@@ -706,11 +736,13 @@ impl TriangleTask {
                     ..Default::default()
                 },
                 &AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                     ..Default::default()
                 },
-                DeviceLayout::for_value(vertices.as_slice()).unwrap()
-            ).unwrap();
+                DeviceLayout::for_value(vertices.as_slice()).unwrap(),
+            )
+            .unwrap();
 
         unsafe {
             vulkano_taskgraph::execute(
@@ -725,13 +757,18 @@ impl TriangleTask {
                 [(vertex_buffer_id, HostAccessType::Write)],
                 // todo: access types below
                 [],
-                []
+                [],
             )
-        }.unwrap();
+        }
+        .unwrap();
 
         let pipeline = None;
 
-        Self { pipeline, vertex_buffer_id, swapchain_id }
+        Self {
+            pipeline,
+            vertex_buffer_id,
+            swapchain_id,
+        }
     }
 
     pub fn create_pipeline(&mut self, app: &App, subpass: &Subpass) {
@@ -773,8 +810,9 @@ impl TriangleTask {
                     dynamic_state: &[DynamicState::Viewport],
                     subpass: Some(subpass.into()),
                     ..GraphicsPipelineCreateInfo::new(&layout)
-                }
-            ).unwrap()
+                },
+            )
+            .unwrap()
         };
 
         self.pipeline = Some(pipeline);
@@ -787,7 +825,7 @@ impl Task for TriangleTask {
     fn clear_values(&self, clear_values: &mut ClearValues<'_>, _world: &Self::World) {
         clear_values.set(
             self.swapchain_id.current_image_id(),
-            [ 2.0 / 255.0, 6.0 / 255.0, 24.0 / 255.0, 1.0 ]
+            [2.0 / 255.0, 6.0 / 255.0, 24.0 / 255.0, 1.0],
         );
     }
 
@@ -802,17 +840,22 @@ impl Task for TriangleTask {
         unsafe { cbf.bind_pipeline_graphics(self.pipeline.as_ref().unwrap()) };
         unsafe { cbf.bind_vertex_buffers(0, &[self.vertex_buffer_id], &[0], &[], &[]) };
 
-        unsafe { cbf.push_constants(self.pipeline.as_ref().unwrap().layout(), 0, &fs::PushConstantData {
-            sampler_id: rcx.dst_sampler_id,
-            dst_image: rcx.dst_sampled_image_id,
-        }) };
+        unsafe {
+            cbf.push_constants(
+                self.pipeline.as_ref().unwrap().layout(),
+                0,
+                &fs::PushConstantData {
+                    sampler_id: rcx.dst_sampler_id,
+                    dst_image: rcx.dst_sampled_image_id,
+                },
+            )
+        };
 
         unsafe { cbf.draw(3, 1, 0, 0) };
 
         Ok(())
     }
 }
-
 
 mod cs {
     vulkano_shaders::shader! {
