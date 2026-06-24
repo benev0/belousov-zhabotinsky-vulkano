@@ -40,10 +40,6 @@ use winit::window::Window;
 use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::EventLoop};
 
 
-mod context;
-mod windowing;
-
-
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 const MIN_SWAPCHAIN_IMAGES: u32 = MAX_FRAMES_IN_FLIGHT + 1;
 
