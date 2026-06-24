@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [profile.dev]
+# incremental = true
 opt-level = 1
 
 [dependencies]
 vulkano = { git = "https://github.com/vulkano-rs/vulkano", rev = "fb1096fa85787a152595ce5ed2048f2224a17114", default-features = true }
 vulkano-shaders = { git = "https://github.com/vulkano-rs/vulkano", rev = "fb1096fa85787a152595ce5ed2048f2224a17114" }
 vulkano-taskgraph = { git = "https://github.com/vulkano-rs/vulkano", rev = "fb1096fa85787a152595ce5ed2048f2224a17114" }
-winit = { version = "0.30.13", default-features = false, features = ["wayland"] }
+winit = { version = "0.30.13" }
 png = "0.17"
