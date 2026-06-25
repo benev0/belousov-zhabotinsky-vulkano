@@ -323,8 +323,7 @@ impl ApplicationHandler for App {
             image_type: vulkano::image::ImageType::Dim2d,
             format: vulkano::format::Format::R8G8B8A8_UNORM,
             extent: [1024, 1024, 1],
-            // todo: maybe remove storage from src_img
-            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,// | ImageUsage::STORAGE,
+            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
             ..Default::default()
         });
 
@@ -332,7 +331,7 @@ impl ApplicationHandler for App {
             image_type: vulkano::image::ImageType::Dim2d,
             format: vulkano::format::Format::R8G8B8A8_UNORM,
             extent: [1024, 1024, 1],
-            usage: /* ImageUsage::TRANSFER_DST | */ ImageUsage::SAMPLED | ImageUsage::STORAGE,
+            usage:ImageUsage::SAMPLED | ImageUsage::STORAGE,
             ..Default::default()
         });
 
@@ -361,7 +360,7 @@ impl ApplicationHandler for App {
                     image_type: vulkano::image::ImageType::Dim2d,
                     format: vulkano::format::Format::R8G8B8A8_UNORM,
                     extent: [1024, 1024, 1],
-                    usage: /* ImageUsage::TRANSFER_DST | */ ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                    usage: ImageUsage::SAMPLED | ImageUsage::STORAGE,
                     ..Default::default()
                 },
                 &Default::default(),
