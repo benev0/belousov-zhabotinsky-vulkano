@@ -13,3 +13,4 @@ vulkano-shaders = { git = "https://github.com/vulkano-rs/vulkano", rev = "fb1096
 vulkano-taskgraph = { git = "https://github.com/vulkano-rs/vulkano", rev = "fb1096fa85787a152595ce5ed2048f2224a17114" }
 winit = { version = "0.30.13" }
 png = "0.17"
+rand = "0.10.1"

@@ -1,11 +1,9 @@
 use std::default::Default;
 use std::error::Error;
 use std::mem;
-use std::slice;
 use std::sync::Arc;
 
 use vulkano::Version;
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::device::{
     Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
@@ -15,6 +13,7 @@ use vulkano::image::ImageCreateFlags;
 use vulkano::image::ImageLayout;
 use vulkano::image::ImageSubresourceRange;
 use vulkano::image::sampler::Filter;
+use vulkano::image::sampler::SamplerAddressMode::Repeat;
 use vulkano::image::sampler::SamplerCreateInfo;
 use vulkano::image::view::ImageViewCreateInfo;
 use vulkano::image::{Image, ImageCreateInfo, ImageUsage};
@@ -25,38 +24,25 @@ use vulkano::instance::debug::DebugUtilsMessenger;
 use vulkano::instance::debug::DebugUtilsMessengerCallback;
 use vulkano::instance::debug::DebugUtilsMessengerCreateInfo;
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
-use vulkano::memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter};
-use vulkano::pipeline::compute::ComputePipelineCreateInfo;
-use vulkano::pipeline::{ComputePipeline, Pipeline};
 use vulkano::swapchain::{Surface, Swapchain, SwapchainCreateInfo};
 use vulkano::{VulkanError, VulkanLibrary};
-use vulkano::{
-    buffer::BufferContents,
-    pipeline::{
-        DynamicState, GraphicsPipeline, PipelineShaderStageCreateInfo,
-        graphics::{
-            GraphicsPipelineCreateInfo,
-            color_blend::{ColorBlendAttachmentState, ColorBlendState},
-            input_assembly::InputAssemblyState,
-            multisample::MultisampleState,
-            rasterization::RasterizationState,
-            vertex_input::{Vertex, VertexDefinition},
-            viewport::{Viewport, ViewportState},
-        },
-    },
-    render_pass::Subpass,
-};
+use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano_taskgraph::descriptor_set::BindlessContext;
 use vulkano_taskgraph::descriptor_set::SamplerId;
 use vulkano_taskgraph::graph::{
     AttachmentInfo, CompileInfo, ExecutableTaskGraph, ExecuteError, TaskGraph,
 };
 use vulkano_taskgraph::resource::ResourcesCreateInfo;
-use vulkano_taskgraph::resource::{self, AccessTypes, Flight, HostAccessType, Resources};
-use vulkano_taskgraph::{ClearValues, Id, Task, TaskContext, resource_map};
+use vulkano_taskgraph::resource::{self, AccessTypes, Flight, Resources};
+use vulkano_taskgraph::{Id, resource_map};
 use winit::event_loop::ControlFlow;
 use winit::window::Window;
 use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::EventLoop};
+
+use crate::graphics::TriangleTask;
+
+mod compute;
+mod graphics;
 
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 const MIN_SWAPCHAIN_IMAGES: u32 = MAX_FRAMES_IN_FLIGHT + 1;
@@ -198,11 +184,11 @@ impl App {
                     .iter()
                     .enumerate()
                     .position(|(i, q)| {
-                        // fixme: devices do not always have a graphics/compute with present.
+                        // todo: devices do not always have a graphics/compute with present.
                         // this should be two checks, one for compute and one for graphics.
                         // +transfer?
                         q.queue_flags
-                            .intersects(QueueFlags::GRAPHICS | QueueFlags::COMPUTE)
+                            .intersects(QueueFlags::GRAPHICS | QueueFlags::COMPUTE | QueueFlags::TRANSFER )
                             && p.presentation_support(i as u32, event_loop)
                     })
                     .map(|i| (p, i as u32))
@@ -235,7 +221,6 @@ impl App {
         }
 
         let (device, mut queues) = Device::new(
-            // Which physical device to connect to.
             &physical_device,
             &DeviceCreateInfo {
                 enabled_extensions: &device_extensions,
@@ -339,7 +324,7 @@ impl ApplicationHandler for App {
             format: vulkano::format::Format::R8G8B8A8_UNORM,
             extent: [1024, 1024, 1],
             // todo: maybe remove storage from src_img
-            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,// | ImageUsage::STORAGE,
             ..Default::default()
         });
 
@@ -347,7 +332,7 @@ impl ApplicationHandler for App {
             image_type: vulkano::image::ImageType::Dim2d,
             format: vulkano::format::Format::R8G8B8A8_UNORM,
             extent: [1024, 1024, 1],
-            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+            usage: /* ImageUsage::TRANSFER_DST | */ ImageUsage::SAMPLED | ImageUsage::STORAGE,
             ..Default::default()
         });
 
@@ -360,6 +345,8 @@ impl ApplicationHandler for App {
                     format: vulkano::format::Format::R8G8B8A8_UNORM,
                     extent: [1024, 1024, 1],
                     usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                    // todo: look at init code for image
+                    // initial_layout: ImageLayout::Preinitialized,
                     ..Default::default()
                 },
                 &Default::default(),
@@ -374,7 +361,7 @@ impl ApplicationHandler for App {
                     image_type: vulkano::image::ImageType::Dim2d,
                     format: vulkano::format::Format::R8G8B8A8_UNORM,
                     extent: [1024, 1024, 1],
-                    usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                    usage: /* ImageUsage::TRANSFER_DST | */ ImageUsage::SAMPLED | ImageUsage::STORAGE,
                     ..Default::default()
                 },
                 &Default::default(),
@@ -387,6 +374,7 @@ impl ApplicationHandler for App {
                 mag_filter: Filter::Linear,
                 min_filter: Filter::Linear,
                 mipmap_mode: vulkano::image::sampler::SamplerMipmapMode::Nearest,
+                address_mode: [Repeat, Repeat, Repeat],
                 ..Default::default()
             })
             .unwrap();
@@ -397,6 +385,7 @@ impl ApplicationHandler for App {
                 mag_filter: Filter::Linear,
                 min_filter: Filter::Linear,
                 mipmap_mode: vulkano::image::sampler::SamplerMipmapMode::Nearest,
+                address_mode: [Repeat, Repeat, Repeat],
                 ..Default::default()
             })
             .unwrap();
@@ -473,7 +462,7 @@ impl ApplicationHandler for App {
             .create_task_node(
                 "Compute",
                 vulkano_taskgraph::QueueFamilyType::Compute,
-                ComputeTask::new(&self),
+                compute::ComputeTask::new(&self, src_image_id),
             )
             .image_access(
                 virtual_dst_image_id,
@@ -498,7 +487,7 @@ impl ApplicationHandler for App {
             .create_task_node(
                 "Triangle",
                 vulkano_taskgraph::QueueFamilyType::Graphics,
-                TriangleTask::new(self, virtual_swapchain_id),
+                graphics::TriangleTask::new(self, virtual_swapchain_id),
             )
             .framebuffer(virtual_frame_buffer_id)
             .color_attachment(
@@ -634,246 +623,5 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
         let rcx = self.rcx.as_mut().unwrap();
         rcx.window.request_redraw();
-    }
-}
-
-#[derive(Clone, Copy, BufferContents, Vertex)]
-#[repr(C)]
-struct MyVertex {
-    #[format(R32G32_SFLOAT)]
-    position: [f32; 2],
-}
-
-struct ComputeTask {
-    pipeline: Arc<ComputePipeline>,
-    // src_img: Id<Image>,
-    // dst_img: Id<Image>,
-    // src_sampler: SamplerId,
-}
-
-impl ComputeTask {
-    pub fn new(app: &App) -> Self {
-        let bcx = app.resources.bindless_context().unwrap();
-
-        let pipeline = {
-            let cs = unsafe { cs::load(&app.device) }
-                .unwrap()
-                .entry_point("main")
-                .unwrap();
-
-            let stage = PipelineShaderStageCreateInfo::new(&cs);
-
-            let layout = bcx
-                .pipeline_layout_from_stages(slice::from_ref(&stage))
-                .unwrap();
-
-            ComputePipeline::new(
-                &app.device,
-                None,
-                &ComputePipelineCreateInfo::new(stage, &layout),
-            )
-            .unwrap()
-        };
-
-        Self { pipeline }
-    }
-}
-
-impl Task for ComputeTask {
-    type World = RenderContext;
-
-    unsafe fn execute(
-        &self,
-        cbf: &mut vulkano_taskgraph::command_buffer::RecordingCommandBuffer<'_>,
-        _tcx: &mut TaskContext<'_>,
-        world: &Self::World,
-    ) -> vulkano_taskgraph::TaskResult {
-        unsafe { cbf.bind_pipeline_compute(&self.pipeline) };
-
-        unsafe {
-            cbf.push_constants(
-                self.pipeline.layout(),
-                0,
-                &cs::PushConstantData {
-                    sampler_id: world.src_sampler_id,
-                    src_image: world.src_sampled_image_id,
-                    dst_image: world.dst_storage_image_id,
-                },
-            )
-        };
-
-        unsafe { cbf.dispatch([128, 128, 1]) };
-
-        Ok(())
-    }
-}
-
-struct TriangleTask {
-    pipeline: Option<Arc<GraphicsPipeline>>,
-    vertex_buffer_id: Id<Buffer>,
-    swapchain_id: Id<Swapchain>,
-}
-
-impl TriangleTask {
-    fn new(app: &mut App, swapchain_id: Id<Swapchain>) -> Self {
-        let vertices = [
-            MyVertex {
-                position: [-0.5, -0.25],
-            },
-            MyVertex {
-                position: [0.0, 0.5],
-            },
-            MyVertex {
-                position: [0.25, -0.1],
-            },
-        ];
-
-        let vertex_buffer_id = app
-            .resources
-            .create_buffer(
-                &BufferCreateInfo {
-                    usage: BufferUsage::VERTEX_BUFFER,
-                    ..Default::default()
-                },
-                &AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-                DeviceLayout::for_value(vertices.as_slice()).unwrap(),
-            )
-            .unwrap();
-
-        unsafe {
-            vulkano_taskgraph::execute(
-                &app.queue,
-                &app.resources,
-                app.flight_id,
-                |_, tcx| {
-                    tcx.try_write_buffer::<[MyVertex]>(vertex_buffer_id, ..)?
-                        .copy_from_slice(&vertices);
-                    Ok(())
-                },
-                [(vertex_buffer_id, HostAccessType::Write)],
-                // todo: access types below
-                [],
-                [],
-            )
-        }
-        .unwrap();
-
-        let pipeline = None;
-
-        Self {
-            pipeline,
-            vertex_buffer_id,
-            swapchain_id,
-        }
-    }
-
-    pub fn create_pipeline(&mut self, app: &App, subpass: &Subpass) {
-        let pipeline = {
-            let vs = unsafe { vs::load(&app.device) }
-                .unwrap()
-                .entry_point("main")
-                .unwrap();
-            let fs = unsafe { fs::load(&app.device) }
-                .unwrap()
-                .entry_point("main")
-                .unwrap();
-
-            let vertex_input_state = MyVertex::per_vertex().definition(&vs).unwrap();
-
-            let stages = [
-                PipelineShaderStageCreateInfo::new(&vs),
-                PipelineShaderStageCreateInfo::new(&fs),
-            ];
-
-            let bcx = app.resources.bindless_context().unwrap();
-
-            let layout = bcx.pipeline_layout_from_stages(&stages).unwrap();
-
-            GraphicsPipeline::new(
-                &app.device,
-                None,
-                &GraphicsPipelineCreateInfo {
-                    stages: &stages,
-                    vertex_input_state: Some(&vertex_input_state),
-                    input_assembly_state: Some(&InputAssemblyState::default()),
-                    viewport_state: Some(&ViewportState::default()),
-                    rasterization_state: Some(&RasterizationState::default()),
-                    multisample_state: Some(&MultisampleState::default()),
-                    color_blend_state: Some(&ColorBlendState {
-                        attachments: &[ColorBlendAttachmentState::default()],
-                        ..Default::default()
-                    }),
-                    dynamic_state: &[DynamicState::Viewport],
-                    subpass: Some(subpass.into()),
-                    ..GraphicsPipelineCreateInfo::new(&layout)
-                },
-            )
-            .unwrap()
-        };
-
-        self.pipeline = Some(pipeline);
-    }
-}
-
-impl Task for TriangleTask {
-    type World = RenderContext;
-
-    fn clear_values(&self, clear_values: &mut ClearValues<'_>, _world: &Self::World) {
-        clear_values.set(
-            self.swapchain_id.current_image_id(),
-            [2.0 / 255.0, 6.0 / 255.0, 24.0 / 255.0, 1.0],
-        );
-    }
-
-    unsafe fn execute(
-        &self,
-        cbf: &mut vulkano_taskgraph::command_buffer::RecordingCommandBuffer<'_>,
-        _tcx: &mut TaskContext<'_>,
-        rcx: &Self::World,
-    ) -> vulkano_taskgraph::TaskResult {
-        unsafe { cbf.set_viewport(0, slice::from_ref(&rcx.viewport)) };
-
-        unsafe { cbf.bind_pipeline_graphics(self.pipeline.as_ref().unwrap()) };
-        unsafe { cbf.bind_vertex_buffers(0, &[self.vertex_buffer_id], &[0], &[], &[]) };
-
-        unsafe {
-            cbf.push_constants(
-                self.pipeline.as_ref().unwrap().layout(),
-                0,
-                &fs::PushConstantData {
-                    sampler_id: rcx.dst_sampler_id,
-                    dst_image: rcx.dst_sampled_image_id,
-                },
-            )
-        };
-
-        unsafe { cbf.draw(3, 1, 0, 0) };
-
-        Ok(())
-    }
-}
-
-mod cs {
-    vulkano_shaders::shader! {
-        ty: "compute",
-        path: "shader.comp",
-    }
-}
-
-mod vs {
-    vulkano_shaders::shader! {
-        ty: "vertex",
-        path: "shader.vert",
-    }
-}
-
-mod fs {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "shader.frag",
     }
 }
