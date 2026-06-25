@@ -47,6 +47,7 @@
           LD_LIBRARY_PATH = lib.makeLibraryPath buildInputs;
           SHADERC_LIB_DIR = lib.makeLibraryPath [ shaderc ];
           VK_LAYER_PATH = "${vulkan-validation-layers}/share/vulkan/explicit_layer.d";
+          RUSTC_WRAPPER = "${sccache}/bin/sccache";
         };
       }
     );
