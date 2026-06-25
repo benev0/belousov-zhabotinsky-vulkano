@@ -24,9 +24,9 @@ use vulkano::instance::debug::DebugUtilsMessenger;
 use vulkano::instance::debug::DebugUtilsMessengerCallback;
 use vulkano::instance::debug::DebugUtilsMessengerCreateInfo;
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
+use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::swapchain::{Surface, Swapchain, SwapchainCreateInfo};
 use vulkano::{VulkanError, VulkanLibrary};
-use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano_taskgraph::descriptor_set::BindlessContext;
 use vulkano_taskgraph::descriptor_set::SamplerId;
 use vulkano_taskgraph::graph::{
@@ -187,9 +187,9 @@ impl App {
                         // todo: devices do not always have a graphics/compute with present.
                         // this should be two checks, one for compute and one for graphics.
                         // +transfer?
-                        q.queue_flags
-                            .intersects(QueueFlags::GRAPHICS | QueueFlags::COMPUTE | QueueFlags::TRANSFER )
-                            && p.presentation_support(i as u32, event_loop)
+                        q.queue_flags.intersects(
+                            QueueFlags::GRAPHICS | QueueFlags::COMPUTE | QueueFlags::TRANSFER,
+                        ) && p.presentation_support(i as u32, event_loop)
                     })
                     .map(|i| (p, i as u32))
             })
@@ -331,7 +331,7 @@ impl ApplicationHandler for App {
             image_type: vulkano::image::ImageType::Dim2d,
             format: vulkano::format::Format::R8G8B8A8_UNORM,
             extent: [1024, 1024, 1],
-            usage:ImageUsage::SAMPLED | ImageUsage::STORAGE,
+            usage: ImageUsage::SAMPLED | ImageUsage::STORAGE,
             ..Default::default()
         });
 
